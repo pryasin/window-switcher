@@ -6,6 +6,7 @@ mod regedit;
 mod scheduled_task;
 mod single_instance;
 mod window;
+mod window_effects;
 mod windows_theme;
 mod windows_version;
 
@@ -17,6 +18,7 @@ pub use regedit::*;
 pub use scheduled_task::*;
 pub use single_instance::*;
 pub use window::*;
+pub use window_effects::*;
 pub use windows_theme::*;
 pub use windows_version::*;
 
