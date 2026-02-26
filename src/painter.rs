@@ -1,5 +1,5 @@
 use crate::app::SwitchAppsState;
-use crate::utils::{check_error, get_moinitor_rect, is_light_theme, is_win11};
+use crate::utils::{apply_overlay_blur, check_error, get_moinitor_rect, is_light_theme, is_win11};
 
 use anyhow::{Context, Result};
 use windows::Win32::{
@@ -14,11 +14,11 @@ use windows::Win32::{
         GdiPlus::{
             FillModeAlternate, GdipAddPathArc, GdipClosePathFigure, GdipCreateBitmapFromHBITMAP,
             GdipCreateFromHDC, GdipCreatePath, GdipCreatePen1, GdipDeleteBrush, GdipDeleteGraphics,
-            GdipDeletePath, GdipDeletePen, GdipDisposeImage, GdipDrawImageRect, GdipFillPath,
-            GdipFillRectangle, GdipGetPenBrushFill, GdipSetInterpolationMode, GdipSetSmoothingMode,
-            GdiplusShutdown, GdiplusStartup, GdiplusStartupInput, GpBitmap, GpBrush, GpGraphics,
-            GpImage, GpPath, GpPen, InterpolationModeHighQualityBicubic, SmoothingModeAntiAlias,
-            Unit,
+            GdipDeletePath, GdipDeletePen, GdipDisposeImage, GdipDrawImageRect, GdipDrawPath,
+            GdipDrawRectangle, GdipFillPath, GdipFillRectangle, GdipGetPenBrushFill,
+            GdipSetInterpolationMode, GdipSetSmoothingMode, GdiplusShutdown, GdiplusStartup,
+            GdiplusStartupInput, GpBitmap, GpBrush, GpGraphics, GpImage, GpPath, GpPen,
+            InterpolationModeHighQualityBicubic, SmoothingModeAntiAlias, Unit,
         },
     },
     UI::{
@@ -31,7 +31,6 @@ use windows::Win32::{
 };
 
 pub const BG_DARK_COLOR: u32 = 0x4c4c4c;
-pub const FG_DARK_COLOR: u32 = 0x3b3b3b;
 pub const BG_LIGHT_COLOR: u32 = 0xe0e0e0;
 pub const FG_LIGHT_COLOR: u32 = 0xf2f2f2;
 pub const ALPHA_MASK: u32 = 0xff000000;
@@ -48,7 +47,15 @@ pub struct GdiAAPainter {
     hwnd: HWND,
     hdc_screen: HDC,
     rounded_corner: bool,
+    use_window_blur: bool,
     show: bool,
+}
+
+struct ThemeColors {
+    icon_strip_color: u32,
+    active_card_color: u32,
+    container_tint_argb: u32,
+    container_border_argb: u32,
 }
 
 impl GdiAAPainter {
@@ -63,12 +70,14 @@ impl GdiAAPainter {
 
         let hdc_screen = unsafe { GetDC(Some(hwnd)) };
         let rounded_corner = is_win11();
+        let use_window_blur = apply_overlay_blur(hwnd);
 
         Ok(Self {
             token,
             hwnd,
             hdc_screen,
             rounded_corner,
+            use_window_blur,
             show: false,
         })
     }
@@ -92,7 +101,7 @@ impl GdiAAPainter {
         let hwnd = self.hwnd;
         let hdc_screen = self.hdc_screen;
 
-        let (fg_color, bg_color) = theme_color(is_light_theme());
+        let colors = theme_color(is_light_theme());
 
         unsafe {
             let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
@@ -107,7 +116,12 @@ impl GdiAAPainter {
 
             let mut bg_pen = GpPen::default();
             let mut bg_pen_ptr: *mut GpPen = &mut bg_pen;
-            GdipCreatePen1(ALPHA_MASK | bg_color, 0.0, Unit(0), &mut bg_pen_ptr as _);
+            let tint_argb = if self.use_window_blur {
+                colors.container_tint_argb
+            } else {
+                with_alpha(colors.container_tint_argb, 0xEA)
+            };
+            GdipCreatePen1(tint_argb, 0.0, Unit(0), &mut bg_pen_ptr as _);
 
             let mut bg_brush = GpBrush::default();
             let mut bg_brush_ptr: *mut GpBrush = &mut bg_brush;
@@ -134,6 +148,36 @@ impl GdiAAPainter {
                 );
             }
 
+            let mut border_pen = GpPen::default();
+            let mut border_pen_ptr: *mut GpPen = &mut border_pen;
+            GdipCreatePen1(
+                colors.container_border_argb,
+                1.0,
+                Unit(0),
+                &mut border_pen_ptr as _,
+            );
+
+            if self.rounded_corner {
+                draw_round_rect_line(
+                    graphics_ptr,
+                    border_pen_ptr,
+                    0.5,
+                    0.5,
+                    width as f32 - 1.0,
+                    height as f32 - 1.0,
+                    corner_radius as f32,
+                );
+            } else {
+                GdipDrawRectangle(
+                    graphics_ptr,
+                    border_pen_ptr,
+                    0.5,
+                    0.5,
+                    width as f32 - 1.0,
+                    height as f32 - 1.0,
+                );
+            }
+
             let icons_width = item_size * state.apps.len() as i32;
             let icons_height = item_size;
             let bitmap_icons = draw_icons(
@@ -143,8 +187,8 @@ impl GdiAAPainter {
                 icons_width,
                 icons_height,
                 corner_radius,
-                fg_color,
-                bg_color,
+                colors.icon_strip_color,
+                colors.active_card_color,
             );
 
             let mut bitmap = GpBitmap::default();
@@ -185,6 +229,7 @@ impl GdiAAPainter {
             GdipDisposeImage(image_ptr);
             GdipDeleteBrush(bg_brush_ptr);
             GdipDeletePen(bg_pen_ptr);
+            GdipDeletePen(border_pen_ptr);
             GdipDeleteGraphics(graphics_ptr);
 
             let _ = DeleteObject(bitmap_icons.into());
@@ -240,11 +285,25 @@ pub fn find_clicked_app_index(state: &SwitchAppsState) -> Option<usize> {
     None
 }
 
-const fn theme_color(light_theme: bool) -> (u32, u32) {
+const fn theme_color(light_theme: bool) -> ThemeColors {
     match light_theme {
-        true => (FG_LIGHT_COLOR, BG_LIGHT_COLOR),
-        false => (FG_DARK_COLOR, BG_DARK_COLOR),
+        true => ThemeColors {
+            icon_strip_color: BG_LIGHT_COLOR,
+            active_card_color: 0x00CECECE,
+            container_tint_argb: 0xCFEFEFEF,
+            container_border_argb: 0x66A2A2A2,
+        },
+        false => ThemeColors {
+            icon_strip_color: BG_DARK_COLOR,
+            active_card_color: 0x005A5A5A,
+            container_tint_argb: 0xC6282828,
+            container_border_argb: 0x66F8F8F8,
+        },
     }
+}
+
+const fn with_alpha(argb: u32, alpha: u8) -> u32 {
+    (argb & 0x00ff_ffff) | ((alpha as u32) << 24)
 }
 
 unsafe fn draw_round_rect(
@@ -302,6 +361,61 @@ unsafe fn draw_round_rect(
     }
 }
 
+unsafe fn draw_round_rect_line(
+    graphic_ptr: *mut GpGraphics,
+    pen_ptr: *mut GpPen,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    corner_radius: f32,
+) {
+    unsafe {
+        let mut path = GpPath::default();
+        let mut path_ptr: *mut GpPath = &mut path;
+        GdipCreatePath(FillModeAlternate, &mut path_ptr as _);
+        GdipAddPathArc(
+            path_ptr,
+            left,
+            top,
+            corner_radius,
+            corner_radius,
+            180.0,
+            90.0,
+        );
+        GdipAddPathArc(
+            path_ptr,
+            right - corner_radius,
+            top,
+            corner_radius,
+            corner_radius,
+            270.0,
+            90.0,
+        );
+        GdipAddPathArc(
+            path_ptr,
+            right - corner_radius,
+            bottom - corner_radius,
+            corner_radius,
+            corner_radius,
+            0.0,
+            90.0,
+        );
+        GdipAddPathArc(
+            path_ptr,
+            left,
+            bottom - corner_radius,
+            corner_radius,
+            corner_radius,
+            90.0,
+            90.0,
+        );
+        GdipClosePathFigure(path_ptr);
+        GdipDrawPath(graphic_ptr, pen_ptr, path_ptr);
+        GdipDeletePath(path_ptr);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_icons(
     state: &SwitchAppsState,
@@ -310,8 +424,8 @@ fn draw_icons(
     width: i32,
     height: i32,
     corner_radius: i32,
-    fg_color: u32,
     bg_color: u32,
+    active_color: u32,
 ) -> HBITMAP {
     let scaled_width = width * SCALE_FACTOR;
     let scaled_height = height * SCALE_FACTOR;
@@ -329,7 +443,7 @@ fn draw_icons(
         let bitmap_scaled = CreateCompatibleBitmap(hdc_screen, scaled_width, scaled_height);
         SelectObject(hdc_scaled, bitmap_scaled.into());
 
-        let fg_brush = CreateSolidBrush(COLORREF(fg_color));
+        let fg_brush = CreateSolidBrush(COLORREF(active_color));
         let bg_brush = CreateSolidBrush(COLORREF(bg_color));
 
         let rect = RECT {
