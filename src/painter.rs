@@ -35,10 +35,12 @@ pub const FG_DARK_COLOR: u32 = 0x3b3b3b;
 pub const BG_LIGHT_COLOR: u32 = 0xe0e0e0;
 pub const FG_LIGHT_COLOR: u32 = 0xf2f2f2;
 pub const ALPHA_MASK: u32 = 0xff000000;
-pub const ICON_SIZE: i32 = 64;
-pub const WINDOW_BORDER_SIZE: i32 = 10;
-pub const ICON_BORDER_SIZE: i32 = 4;
+pub const ICON_SIZE: i32 = 84;
+pub const WINDOW_BORDER_SIZE: i32 = 18;
+pub const ICON_BORDER_SIZE: i32 = 6;
 pub const SCALE_FACTOR: i32 = 6;
+pub const CORNER_RADIUS_DIVISOR: i32 = 3;
+const ICON_AREA_TOP: i32 = 0;
 
 // GDI Antialiasing Painter
 pub struct GdiAAPainter {
@@ -82,7 +84,7 @@ impl GdiAAPainter {
         } = Coordinate::new(state.apps.len() as i32);
 
         let corner_radius = if self.rounded_corner {
-            item_size / 4
+            item_size / CORNER_RADIUS_DIVISOR
         } else {
             0
         };
@@ -343,7 +345,7 @@ fn draw_icons(
             // draw the box for selected icon
             if i == state.index {
                 let left = scaled_icon_outer_size * (i as i32);
-                let top = 0;
+                let top = ICON_AREA_TOP;
                 let right = left + scaled_icon_outer_size;
                 let bottom = top + scaled_icon_outer_size;
                 let rgn = CreateRoundRectRgn(
